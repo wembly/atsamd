@@ -23,6 +23,9 @@ use usbd_serial::{SerialPort, USB_CLASS_CDC};
 use cortex_m::asm::delay as cycle_delay;
 use cortex_m::peripheral::NVIC;
 
+use bare_metal::{CriticalSection, Mutex};
+use core::cell::RefCell;
+
 #[entry]
 fn main() -> ! {
     let mut peripherals = Peripherals::take().unwrap();
@@ -45,19 +48,23 @@ fn main() -> ! {
             &mut clocks,
             &mut peripherals.MCLK,
         ));
+
         USB_ALLOCATOR.as_ref().unwrap()
     };
 
-    unsafe {
-        USB_SERIAL = Some(SerialPort::new(bus_allocator));
-        USB_BUS = Some(
+    {
+        let cs = unsafe { CriticalSection::new() };
+        USB_SERIAL
+            .borrow(cs)
+            .replace(Some(SerialPort::new(bus_allocator)));
+        USB_BUS.borrow(cs).replace(Some(
             UsbDeviceBuilder::new(bus_allocator, UsbVidPid(0x16c0, 0x27dd))
                 .manufacturer("Fake company")
                 .product("Serial port")
                 .serial_number("TEST")
                 .device_class(USB_CLASS_CDC)
                 .build(),
-        );
+        ));
     }
 
     unsafe {
@@ -76,24 +83,23 @@ fn main() -> ! {
 }
 
 static mut USB_ALLOCATOR: Option<UsbBusAllocator<UsbBus>> = None;
-static mut USB_BUS: Option<UsbDevice<UsbBus>> = None;
-static mut USB_SERIAL: Option<SerialPort<UsbBus>> = None;
+static USB_BUS: Mutex<RefCell<Option<UsbDevice<UsbBus>>>> = Mutex::new(RefCell::new(None));
+static USB_SERIAL: Mutex<RefCell<Option<SerialPort<UsbBus>>>> = Mutex::new(RefCell::new(None));
 
 fn poll_usb() {
-    unsafe {
-        if let Some(usb_dev) = USB_BUS.as_mut() {
-            if let Some(serial) = USB_SERIAL.as_mut() {
-                usb_dev.poll(&mut [serial]);
-                let mut buf = [0u8; 64];
+    let cs = unsafe { CriticalSection::new() };
+    if let Some(usb_dev) = USB_BUS.borrow(cs).borrow_mut().as_mut() {
+        if let Some(serial) = USB_SERIAL.borrow(cs).borrow_mut().as_mut() {
+            usb_dev.poll(&mut [serial]);
+            let mut buf = [0u8; 64];
 
-                if let Ok(count) = serial.read(&mut buf) {
-                    for (i, c) in buf.iter().enumerate() {
-                        if i >= count {
-                            break;
-                        }
-                        serial.write(&[*c]).unwrap();
+            if let Ok(count) = serial.read(&mut buf) {
+                for (i, c) in buf.iter().enumerate() {
+                    if i >= count {
+                        break;
                     }
-                };
+                    serial.write(&[*c]).unwrap();
+                }
             };
         };
     };
