@@ -21,10 +21,11 @@ use usb_device::prelude::*;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 use cortex_m::asm::delay as cycle_delay;
+use cortex_m::interrupt::Mutex;
 use cortex_m::peripheral::NVIC;
 
-use bare_metal::{CriticalSection, Mutex};
 use core::cell::RefCell;
+use core::mem::MaybeUninit;
 
 #[entry]
 fn main() -> ! {
@@ -41,19 +42,16 @@ fn main() -> ! {
     let mut red_led: bsp::RedLed = pin_alias!(pins.red_led).into();
 
     let bus_allocator = unsafe {
-        USB_ALLOCATOR = Some(bsp::usb_allocator(
+        USB_ALLOCATOR.write(bsp::usb_allocator(
             pins.usb_dm,
             pins.usb_dp,
             peripherals.USB,
             &mut clocks,
             &mut peripherals.MCLK,
-        ));
-
-        USB_ALLOCATOR.as_ref().unwrap()
+        ))
     };
 
-    {
-        let cs = unsafe { CriticalSection::new() };
+    cortex_m::interrupt::free(|cs| {
         USB_SERIAL
             .borrow(cs)
             .replace(Some(SerialPort::new(bus_allocator)));
@@ -65,7 +63,7 @@ fn main() -> ! {
                 .device_class(USB_CLASS_CDC)
                 .build(),
         ));
-    }
+    });
 
     unsafe {
         core.NVIC.set_priority(interrupt::USB_OTHER, 1);
@@ -82,27 +80,30 @@ fn main() -> ! {
     }
 }
 
-static mut USB_ALLOCATOR: Option<UsbBusAllocator<UsbBus>> = None;
+static mut USB_ALLOCATOR: MaybeUninit<UsbBusAllocator<UsbBus>> = MaybeUninit::uninit();
 static USB_BUS: Mutex<RefCell<Option<UsbDevice<UsbBus>>>> = Mutex::new(RefCell::new(None));
 static USB_SERIAL: Mutex<RefCell<Option<SerialPort<UsbBus>>>> = Mutex::new(RefCell::new(None));
 
 fn poll_usb() {
-    let cs = unsafe { CriticalSection::new() };
-    if let Some(usb_dev) = USB_BUS.borrow(cs).borrow_mut().as_mut() {
-        if let Some(serial) = USB_SERIAL.borrow(cs).borrow_mut().as_mut() {
-            usb_dev.poll(&mut [serial]);
-            let mut buf = [0u8; 64];
+    // Disable interrupts while accessing USB_SERIAL and USB_BUS to prevent possible
+    // race conditions
+    cortex_m::interrupt::free(|cs| {
+        if let Some(usb_dev) = USB_BUS.borrow(cs).borrow_mut().as_mut() {
+            if let Some(serial) = USB_SERIAL.borrow(cs).borrow_mut().as_mut() {
+                usb_dev.poll(&mut [serial]);
+                let mut buf = [0u8; 64];
 
-            if let Ok(count) = serial.read(&mut buf) {
-                for (i, c) in buf.iter().enumerate() {
-                    if i >= count {
-                        break;
+                if let Ok(count) = serial.read(&mut buf) {
+                    for (i, c) in buf.iter().enumerate() {
+                        if i >= count {
+                            break;
+                        }
+                        serial.write(&[*c]).unwrap();
                     }
-                    serial.write(&[*c]).unwrap();
-                }
+                };
             };
         };
-    };
+    });
 }
 
 #[interrupt]
