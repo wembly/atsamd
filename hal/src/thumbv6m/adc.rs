@@ -1,8 +1,11 @@
 //! Analogue-to-Digital Conversion
+use core::ops::Deref;
+
 use crate::clock::GenericClockController;
 use crate::ehal::adc::{Channel, OneShot};
 use crate::gpio::*;
 use crate::pac::{adc, ADC, PM};
+use crate::typelevel::Sealed;
 
 /// Samples per reading
 pub use adc::avgctrl::SAMPLENUM_A as SampleRate;
@@ -18,12 +21,16 @@ pub use adc::inputctrl::GAIN_A as Gain;
 /// Reference voltage (or its source)
 pub use adc::refctrl::REFSEL_A as Reference;
 
-/// `Adc` encapsulates the device ADC
-pub struct Adc<ADC> {
+pub trait AdcPeripheral: Sealed + Deref<Target = adc::RegisterBlock> {}
+
+impl Sealed for ADC {}
+impl AdcPeripheral for ADC {}
+
+pub struct Adc<ADC: AdcPeripheral> {
     adc: ADC,
 }
 
-impl Adc<ADC> {
+impl<ADC: AdcPeripheral> Adc<ADC> {
     /// Create a new `Adc` instance. The default configuration is:
     /// * 1/32 prescaler
     /// * 12 bit resolution
@@ -142,6 +149,7 @@ impl Adc<ADC> {
 
 impl<WORD, PIN> OneShot<ADC, WORD, PIN> for Adc<ADC>
 where
+    ADC: AdcPeripheral,
     WORD: From<u16>,
     PIN: Channel<ADC, ID = u8>,
 {
@@ -162,6 +170,21 @@ where
     }
 }
 
+pub trait AdcChannel<ADC: AdcPeripheral>: PinId {
+    const CHANNEL: u8;
+}
+
+impl<ADC, I> Channel<ADC> for Pin<I, AlternateB>
+where
+    ADC: AdcPeripheral,
+    I: AdcChannel<ADC>,
+{
+    type ID = u8;
+    fn channel() -> u8 {
+        I::CHANNEL
+    }
+}
+
 macro_rules! adc_pins {
     (
         $(
@@ -169,9 +192,8 @@ macro_rules! adc_pins {
         ),+
     ) => {
         $(
-            impl Channel<ADC> for Pin<$PinId, AlternateB> {
-               type ID = u8;
-               fn channel() -> u8 { $CHAN }
+            impl AdcChannel<ADC> for $PinId {
+                const CHANNEL: u8 = $CHAN;
             }
         )+
     }
